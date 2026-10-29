@@ -1,0 +1,44 @@
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: inscriptions
+      POSTGRES_USER: inscriptions
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?Copier .env.example en .env et définir DB_PASSWORD}
+    ports:
+      - "127.0.0.1:5440:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U inscriptions -d inscriptions"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  identite:
+    image: node:22-alpine
+    command: ["node", "/app/server.mjs"]
+    environment:
+      LATENCY_MS: ${IDENTITY_LATENCY_MS:-200}
+    volumes:
+      - ./mock-identite:/app:ro
+    ports:
+      - "127.0.0.1:9091:9091"
+
+  api:
+    build: ./registration
+    environment:
+      DB_URL: jdbc:postgresql://db:5432/inscriptions
+      DB_USER: inscriptions
+      DB_PASSWORD: ${DB_PASSWORD}
+      IDENTITY_URL: http://identite:9091
+    ports:
+      - "127.0.0.1:${API_PORT:-8080}:8080"
+    depends_on:
+      db:
+        condition: service_healthy
+      identite:
+        condition: service_started
+
+volumes:
+  pgdata:
