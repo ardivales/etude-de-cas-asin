@@ -110,6 +110,27 @@ IDENTITY_LATENCY_MS=8000 docker compose up -d identite
 
 L'inscription répond alors en 5 s avec le statut `en_attente_verification`, au lieu de bloquer.
 
+### Swagger et métriques
+
+| Adresse | Contenu |
+|---|---|
+| http://localhost:8080/swagger-ui.html | Documentation interactive : « Try it out » envoie une inscription préremplie |
+| http://localhost:8080/v3/api-docs | Contrat OpenAPI |
+| http://localhost:8080/actuator/health | État de l'application et de la base (sondes `liveness` et `readiness`) |
+| http://localhost:8080/actuator/prometheus | Métriques au format Prometheus |
+| http://localhost:8080/actuator/metrics | Mêmes métriques, consultables une par une |
+
+Métriques utiles pour l'exploitation :
+
+| Métrique | Ce qu'elle surveille |
+|---|---|
+| `inscriptions_enregistrees_total{statut}` | Inscriptions par statut ; une hausse de `en_attente_verification` signale un service d'identification lent (INC-206) |
+| `inscriptions_refusees_total{motif}` | Refus par motif : `DEJA_INSCRIT`, `MEME_JOUR`, `CENTRE_COMPLET`, `CLOTURE`, `AGE`, `NPI_INCONNU` ; un pic de `CLOTURE` avant l'heure aurait révélé INC-204, un pic de `AGE` INC-205 |
+| `http_client_requests_seconds{client_name="identite"}` | Durée des appels au service d'identification ; alerte proposée au-delà de 2 s au 95e centile |
+| `http_server_requests_seconds{uri="/api/inscriptions"}` | Durée et codes de réponse de l'API |
+
+En production, ces adresses ne sont pas publiques : Actuator est servi sur un port de gestion réservé au réseau interne (`management.server.port`) et Swagger est désactivé (`springdoc.swagger-ui.enabled=false`).
+
 ### Lancer les tests
 
 Les tests démarrent leur propre PostgreSQL 16 avec Testcontainers : seul Docker est nécessaire.
@@ -131,6 +152,7 @@ docker run --rm -v "$PWD/registration":/app -w /app -v /var/run/docker.sock:/var
 | `RegistrationRulesTest` | Âge au 31 décembre (né le 20/06/1991 accepté, le 31/12/1990 refusé) ; clôture en heure du Bénin (ouvert à 23:59:00, fermé à 23:59:01) |
 | `IdentityAdapterTest` | MockServer : identité connue, NPI inconnu, erreur 500, service injoignable, service lent coupé au délai total |
 | `RegistrationApiTest` | API complète sur PostgreSQL : numérotation, doublon, même jour, centre complet, NPI inconnu sans écriture, mise en attente, âge, clôture du Trésor, entrées invalides et injection, instants stockés en UTC, délai configuré à 5 s |
+| `ObservabilityTest` | Santé `UP` avec la base, contrat OpenAPI et Swagger servis, métriques par statut et par motif exposées à Prometheus |
 | `ConcurrencyTest` | Vraies requêtes HTTP simultanées : 40 inscriptions pour 10 places (10 acceptées, numéros L-0001 à L-0010), 15 doubles clics (1 inscription), deux concours du même jour en parallèle (1 inscription) |
 
 Test de mutation : sans les deux verrous, les trois tests de concurrence échouent.
@@ -143,7 +165,8 @@ Test de mutation : sans les deux verrous, les trois tests de concurrence échoue
 | `service` | `RegistrationService` : règles puis appel d'identification, hors transaction. `RegistrationWriter` : étapes 4 à 8 dans une transaction courte. `RegistrationRules` : âge et clôture |
 | `integration.identity` | Client WebClient du service d'identification, délai total de 5 s |
 | `repository`, `entity` | Spring Data JPA ; verrou du centre (`PESSIMISTIC_WRITE`) et verrou consultatif par NPI |
-| `common.exception` | Erreurs RFC 7807 |
+| `common.exception` | Erreurs RFC 7807, compteur des refus par motif |
+| `config` | Client d'identification, horloge, description OpenAPI |
 
 ## Choix de la correction
 

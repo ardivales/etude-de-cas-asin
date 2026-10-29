@@ -78,6 +78,18 @@ public abstract class ApiTestSupport {
         }
     }
 
+    protected HttpResponse<String> get(String path) {
+        HttpRequest request = HttpRequest.newBuilder(URI.create("http://localhost:" + port + path)).GET().build();
+        try {
+            return HTTP.send(request, HttpResponse.BodyHandlers.ofString());
+        } catch (IOException e) {
+            throw new IllegalStateException(e);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException(e);
+        }
+    }
+
     protected static String body(String npi, String exam, String center, String birthDate) {
         return """
             {"npi": "%s", "concours": "%s", "centre": "%s", "naissance": "%s"}""".formatted(npi, exam, center, birthDate);

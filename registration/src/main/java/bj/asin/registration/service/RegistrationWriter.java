@@ -34,16 +34,16 @@ public class RegistrationWriter {
 
         List<Integer> examIds = registrationRepository.findExamIdsOnDate(request.npi(), exam.getExamDate());
         if (examIds.contains(exam.getId())) {
-            throw new BusinessException(RegistrationService.ALREADY_REGISTERED);
+            throw new BusinessException("DEJA_INSCRIT", RegistrationService.ALREADY_REGISTERED);
         }
         if (!examIds.isEmpty()) {
-            throw new BusinessException("Vous êtes déjà inscrit à un concours dont l'épreuve a lieu le même jour.");
+            throw new BusinessException("MEME_JOUR", "Vous êtes déjà inscrit à un concours dont l'épreuve a lieu le même jour.");
         }
 
         Center center = centerRepository.findByCodeForUpdate(request.center())
             .orElseThrow(() -> new InvalidRequestException("Centre d'examen inconnu."));
         if (registrationRepository.countByCenterId(center.getId()) >= center.getCapacity()) {
-            throw new BusinessException("Ce centre d'examen est complet.");
+            throw new BusinessException("CENTRE_COMPLET", "Ce centre d'examen est complet.");
         }
         String tableNumber = center.assignNextTableNumber();
 
