@@ -120,6 +120,21 @@ curl -s -X POST localhost:8080/api/inscriptions -H 'Content-Type: application/js
 
 Les refus suivent la RFC 7807 (`application/problem+json`) : 400 données invalides, 409 règle métier, 503 échec temporaire, sans détail technique. Un NPI ne s'inscrit qu'une fois : pour rejouer, changer ses chiffres.
 
+### Liste des inscrits et recherche (INC-207, SEC-001)
+
+```bash
+curl -s 'localhost:8080/api/centres/P/inscrits?concours=DOUANES&page=0&size=100'; echo
+curl -s 'localhost:8080/api/inscrits/recherche?nom=CAND'; echo
+curl -s -o /dev/null -w '%{http_code}\n' "localhost:8080/api/inscrits/recherche?nom=%27%20OR%20%271%27%3D%271"
+```
+
+| Route | Correction |
+|---|---|
+| `GET /api/centres/{code}/inscrits?concours=…&page=…&size=…` | Une seule requête avec jointure au lieu d'une lecture de `candidats` par inscrit (N+1 d'INC-207), index `(centre_id, concours_id)` et `candidats(npi)`, tri par numéro, pages de 100 lignes au plus. Testé : 5 000 inscrits listés en moins de 2 s |
+| `GET /api/inscrits/recherche?nom=…` | Requête paramétrée (Spring Data), nom limité aux lettres, espaces, tirets et apostrophes, 60 caractères, 50 résultats au plus. Les requêtes de SEC-001 sont refusées en 400 |
+
+Attendu : la liste en JSON, la recherche sur le début du nom, puis `400` pour l'injection. En production, ces deux routes d'agent sont réservées aux agents authentifiés (JWT, comme dans le reste du système d'information).
+
 ### Reproduire INC-206 : service d'identification lent
 
 ```bash
@@ -202,6 +217,7 @@ Attendu : `Tests run: 42, Failures: 0, Errors: 0` puis `BUILD SUCCESS`. La derni
 | `IdentityAdapterTest` | MockServer : identité connue, NPI inconnu, erreur 500, service injoignable, service lent coupé au délai total |
 | `RegistrationApiTest` | API complète sur PostgreSQL : numérotation, doublon, même jour, centre complet, NPI inconnu sans écriture, mise en attente, âge, clôture du Trésor, entrées invalides et injection, instants stockés en UTC, délai configuré à 5 s |
 | `ObservabilityTest` | Santé `UP` avec la base, contrat OpenAPI et Swagger servis, métriques par statut et par motif exposées à Prometheus |
+| `RegistrantApiTest` | Liste en une jointure avec noms et statuts, pagination, 5 000 inscrits en moins de 2 s, recherche par début de nom, 50 résultats au plus, injections de SEC-001 refusées |
 | `ConcurrencyTest` | Vraies requêtes HTTP simultanées : 40 inscriptions pour 10 places (10 acceptées, numéros L-0001 à L-0010), 15 doubles clics (1 inscription), deux concours du même jour en parallèle (1 inscription) |
 
 ### Test de mutation
@@ -221,7 +237,7 @@ Attendu : `Tests run: 3, Failures: 3` (5 inscrits au lieu de 10, 2 inscriptions 
 
 | Paquet | Rôle |
 |---|---|
-| `controller` | `POST /api/inscriptions`, validation des entrées |
+| `controller` | `POST /api/inscriptions`, liste des inscrits, recherche ; validation des entrées |
 | `service` | `RegistrationService` : règles puis appel d'identification, hors transaction. `RegistrationWriter` : étapes 4 à 8 dans une transaction courte. `RegistrationRules` : âge et clôture |
 | `integration.identity` | Client WebClient du service d'identification, délai total de 5 s |
 | `repository`, `entity` | Spring Data JPA ; verrou du centre (`PESSIMISTIC_WRITE`) et verrou consultatif par NPI |
@@ -249,6 +265,5 @@ docker compose down -v
 
 - Traitement de reprise des inscriptions `en_attente_verification`.
 - Convocation lue depuis `candidats`, sans appel au service d'identification.
-- Liste des inscrits en une requête avec jointure et pagination (INC-207).
 - Clé d'idempotence sur `POST /api/inscriptions` et bouton désactivé pendant l'envoi.
 - Authentification des routes d'agent, limitation de débit, alertes sur les erreurs 500 et les durées d'appel.

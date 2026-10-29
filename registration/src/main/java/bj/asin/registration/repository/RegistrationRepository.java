@@ -1,6 +1,8 @@
 package bj.asin.registration.repository;
 
+import bj.asin.registration.dto.RegistrantDtos.RegistrantView;
 import bj.asin.registration.entity.Registration;
+import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
@@ -17,4 +19,14 @@ public interface RegistrationRepository extends JpaRepository<Registration, Inte
     List<Integer> findExamIdsOnDate(@Param("npi") String npi, @Param("examDate") LocalDate examDate);
 
     long countByCenterId(Integer centerId);
+
+    @Query("""
+        select new bj.asin.registration.dto.RegistrantDtos$RegistrantView(r.tableNumber, r.npi, c.lastName, c.firstNames, r.status)
+        from Registration r
+        join Center ce on ce.id = r.centerId
+        join Exam e on e.id = r.examId
+        left join Candidate c on c.npi = r.npi
+        where ce.code = :center and e.code = :exam
+        order by r.tableNumber""")
+    List<RegistrantView> findRegistrants(@Param("center") String center, @Param("exam") String exam, Pageable pageable);
 }

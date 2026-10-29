@@ -21,7 +21,7 @@ Toutes les autres recherches viennent de 10.20.1.15 (poste interne). La recherch
 
 1. Couper `GET /api/inscrits/recherche` depuis Internet (règle sur le serveur frontal), le restreindre au réseau interne.
 2. Bloquer 102.64.217.33 et rechercher ses autres requêtes dans tous les journaux (serveur frontal, PostgreSQL) avant et après le 20/11.
-3. Corriger la requête par paramètres liés : `WHERE nom LIKE %s || '%%' LIMIT 50`, avec `nom` limité à des lettres, espaces, tirets et apostrophes, 60 caractères au plus.
+3. Corriger la requête par paramètres liés, avec `nom` limité à des lettres, espaces, tirets et apostrophes, 60 caractères au plus. C'est fait dans `GET /api/inscrits/recherche` de l'application Spring : les quatre requêtes de l'attaque sont refusées en 400 (`RegistrantApiTest`).
 4. Ne plus renvoyer d'erreur SQL au client : message générique et identifiant de requête.
 5. Compte SQL de l'application en lecture/écriture sur ses seules tables, sans droit DDL ; changer son mot de passe.
 6. Conserver les preuves : copie des journaux, horodatée et protégée.
