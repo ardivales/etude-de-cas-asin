@@ -22,7 +22,6 @@ Le journal et l'export ne sont pas versionnés : ils contiennent des données pe
 
 - Docker (avec Docker Compose)
 - Python 3.10 ou plus, pour l'analyse du journal
-- `psql`, pour le script de réparation
 - Facultatif : JDK 21 ou plus et Maven 3.9, pour lancer les tests hors conteneur
 
 ## 1. Analyser le journal
@@ -46,27 +45,33 @@ Résultats sur le journal fourni :
 
 Le programme signale aussi les recherches suspectes (injection SQL).
 
-## 2. Démarrer une base PostgreSQL
+## 2. Démarrer la pile Docker
 
-Avec Docker, accessible depuis la machine locale seulement :
+PostgreSQL 16, l'API Spring Boot et un service d'identification simulé, exposés sur la machine locale seulement.
 
 ```bash
-export PGPASSWORD='choisir-un-mot-de-passe'
-docker run -d --name asin-tma-pg -e POSTGRES_USER=tma -e POSTGRES_PASSWORD="$PGPASSWORD" \
-  -e POSTGRES_DB=inscriptions -p 127.0.0.1:5439:5432 postgres:16
+cp .env.example .env
+sed -i "s/^DB_PASSWORD=.*/DB_PASSWORD=$(openssl rand -hex 16)/" .env
+docker compose up -d --build
+docker compose ps
 ```
+
+Attendu : trois services `running` (`db`, `identite`, `api`). Le premier build prend quelques minutes. Si une pile tournait déjà avec un autre mot de passe, repartir de zéro avec `docker compose down -v`.
 
 ## 3. Réparer les données
 
-L'export doit être chargé dans une base vide : ses `DROP TABLE` sans `CASCADE` échouent sur une base déjà réparée.
+Le script est appliqué à l'export dans une base `reprise` séparée, à l'intérieur du conteneur PostgreSQL : pas besoin d'installer `psql`. L'export doit être chargé dans une base vide : ses `DROP TABLE` sans `CASCADE` échouent sur une base déjà réparée.
 
 ```bash
-psql -h 127.0.0.1 -p 5439 -U tma -d postgres -c "DROP DATABASE IF EXISTS reprise" -c "CREATE DATABASE reprise"
-export PSQL="psql -h 127.0.0.1 -p 5439 -U tma -d reprise"
-$PSQL -q -f base_inscriptions.sql
-$PSQL -f sql/reparation.sql
-$PSQL -f sql/reparation.sql
+docker compose exec -T db psql -U inscriptions -d postgres -c "DROP DATABASE IF EXISTS reprise" -c "CREATE DATABASE reprise"
+docker compose exec -T db psql -U inscriptions -d reprise -q < base_inscriptions.sql
+docker compose exec -T db psql -U inscriptions -d reprise < sql/reparation.sql
+docker compose exec -T db psql -U inscriptions -d reprise < sql/reparation.sql
+docker compose exec -T db psql -U inscriptions -d reprise -c \
+  "SELECT count(*) AS inscriptions, count(DISTINCT (centre_id, numero_table)) AS numeros_distincts FROM inscriptions"
 ```
+
+Attendu : 7 doublons archivés, 15 numéros réattribués, 7 inscriptions de Lokossa hors capacité, à l'identique au second passage ; 6 393 inscriptions pour 6 393 numéros distincts. Avec un `psql` local, `psql -f sql/reparation.sql` fonctionne de la même façon.
 
 Le second passage ne modifie rien. Le script s'exécute dans une seule transaction : en cas d'erreur, rien n'est appliqué.
 
@@ -91,24 +96,41 @@ Personnes à prévenir :
 
 Application monolithique Spring Boot 3.3, Java 21, Spring Data JPA, PostgreSQL 16, schéma versionné par Liquibase. Le schéma Liquibase décrit la base cible, celle que produit `sql/reparation.sql` à partir de l'export.
 
-### Lancer avec Docker
+La pile démarrée à l'étape 2 sert l'API sur http://localhost:8080.
+
+### Essayer l'API
 
 ```bash
-cp .env.example .env                 # puis choisir DB_PASSWORD
-docker compose up -d --build
-curl -X POST localhost:8080/api/inscriptions -H 'Content-Type: application/json' \
-  -d '{"npi":"3076016910","concours":"DOUANES","centre":"P","naissance":"1995-04-02"}'
+curl -s -X POST localhost:8080/api/inscriptions -H 'Content-Type: application/json' \
+  -d '{"npi":"3076016910","concours":"DOUANES","centre":"P","naissance":"1995-04-02"}'; echo
+curl -s -X POST localhost:8080/api/inscriptions -H 'Content-Type: application/json' \
+  -d '{"npi":"3076016910","concours":"DOUANES","centre":"P","naissance":"1995-04-02"}'; echo
+curl -s -X POST localhost:8080/api/inscriptions -H 'Content-Type: application/json' \
+  -d '{"npi":"1111111111","concours":"IMPOTS","centre":"C","naissance":"1991-06-20"}'; echo
+curl -s -X POST localhost:8080/api/inscriptions -H 'Content-Type: application/json' \
+  -d '{"npi":"0001234567","concours":"DOUANES","centre":"C","naissance":"1995-04-02"}'; echo
 ```
 
-Réponse : `201 {"id":1,"numeroTable":"P-0001","statut":"validee"}`. Les refus suivent la RFC 7807 (`application/problem+json`) : 400 données invalides, 409 règle métier, 503 échec temporaire, sans détail technique.
+| Appel | Réponse attendue |
+|---|---|
+| Première inscription | `201 {"id":1,"numeroTable":"P-0001","statut":"validee"}` |
+| Même appel une seconde fois | 409 « Vous êtes déjà inscrit à ce concours. » |
+| Né le 20/06/1991 (INC-205) | 201 : la règle d'âge est corrigée |
+| NPI commençant par `000` | 409 « NPI inconnu du service d'identification. » (le service simulé répond 404) |
 
-Le service d'identification simulé répond 404 pour un NPI commençant par `000`. Pour reproduire INC-206 :
+Les refus suivent la RFC 7807 (`application/problem+json`) : 400 données invalides, 409 règle métier, 503 échec temporaire, sans détail technique. Un NPI ne s'inscrit qu'une fois : pour rejouer, changer ses chiffres.
+
+### Reproduire INC-206 : service d'identification lent
 
 ```bash
 IDENTITY_LATENCY_MS=8000 docker compose up -d identite
+sleep 2
+curl -s -w '  -> %{http_code} en %{time_total}s\n' -X POST localhost:8080/api/inscriptions -H 'Content-Type: application/json' \
+  -d '{"npi":"4444444444","concours":"DOUANES","centre":"A","naissance":"1995-04-02"}'
+docker compose up -d identite
 ```
 
-L'inscription répond alors en 5 s avec le statut `en_attente_verification`, au lieu de bloquer.
+Attendu : réponse 201 en 5 s environ, statut `en_attente_verification`, au lieu de bloquer jusqu'à 62 s comme le 19/11. La dernière commande remet le service à 200 ms.
 
 ### Swagger et métriques
 
@@ -131,6 +153,30 @@ Métriques utiles pour l'exploitation :
 
 En production, ces adresses ne sont pas publiques : Actuator est servi sur un port de gestion réservé au réseau interne (`management.server.port`) et Swagger est désactivé (`springdoc.swagger-ui.enabled=false`).
 
+### Concurrence à la main
+
+On laisse 10 places libres à Lokossa, puis 40 candidats différents s'inscrivent au même instant :
+
+```bash
+docker compose exec -T db psql -U inscriptions -d inscriptions -c \
+  "UPDATE centres SET capacite = (SELECT count(*) FROM inscriptions WHERE centre_id = 3) + 10 WHERE code = 'L'"
+seq -w 0 39 | xargs -P 40 -I{} curl -s -o /dev/null -w '%{http_code}\n' -X POST localhost:8080/api/inscriptions \
+  -H 'Content-Type: application/json' -d '{"npi":"70000000{}","concours":"DOUANES","centre":"L","naissance":"1998-05-05"}' | sort | uniq -c
+docker compose exec -T db psql -U inscriptions -d inscriptions -c \
+  "SELECT c.capacite, count(i.id) AS inscrits, count(DISTINCT i.numero_table) AS numeros_distincts FROM centres c LEFT JOIN inscriptions i ON i.centre_id = c.id WHERE c.code = 'L' GROUP BY c.capacite"
+```
+
+Attendu : `10 201` et `30 409` ; autant d'inscrits que de places, autant de numéros distincts que d'inscrits.
+
+Double clic, 15 envois simultanés du même candidat :
+
+```bash
+seq 1 15 | xargs -P 15 -I{} curl -s -o /dev/null -w '%{http_code}\n' -X POST localhost:8080/api/inscriptions \
+  -H 'Content-Type: application/json' -d '{"npi":"8000000001","concours":"IMPOTS","centre":"C","naissance":"1998-05-05"}' | sort | uniq -c
+```
+
+Attendu : `1 201` et `14 409`. Pour rejouer, changer le préfixe des NPI.
+
 ### Lancer les tests
 
 Les tests démarrent leur propre PostgreSQL 16 avec Testcontainers : seul Docker est nécessaire.
@@ -145,7 +191,10 @@ Sans Java ni Maven sur la machine :
 docker run --rm -v "$PWD/registration":/app -w /app -v /var/run/docker.sock:/var/run/docker.sock \
   -e TESTCONTAINERS_HOST_OVERRIDE=host.docker.internal --add-host=host.docker.internal:host-gateway \
   maven:3.9-eclipse-temurin-21 mvn -B verify
+docker run --rm -v "$PWD/registration":/app alpine chown -R "$(id -u):$(id -g)" /app/target
 ```
+
+Attendu : `Tests run: 42, Failures: 0, Errors: 0` puis `BUILD SUCCESS`. La dernière commande rend à votre utilisateur le dossier `target` créé par le conteneur.
 
 | Classe | Ce qui est vérifié |
 |---|---|
@@ -155,7 +204,18 @@ docker run --rm -v "$PWD/registration":/app -w /app -v /var/run/docker.sock:/var
 | `ObservabilityTest` | Santé `UP` avec la base, contrat OpenAPI et Swagger servis, métriques par statut et par motif exposées à Prometheus |
 | `ConcurrencyTest` | Vraies requêtes HTTP simultanées : 40 inscriptions pour 10 places (10 acceptées, numéros L-0001 à L-0010), 15 doubles clics (1 inscription), deux concours du même jour en parallèle (1 inscription) |
 
-Test de mutation : sans les deux verrous, les trois tests de concurrence échouent.
+### Test de mutation
+
+Pour prouver que les tests de concurrence détectent le défaut d'origine, on retire les deux verrous, on relance, puis on restaure :
+
+```bash
+sed -i '/@Lock(LockModeType.PESSIMISTIC_WRITE)/d' registration/src/main/java/bj/asin/registration/repository/CenterRepository.java
+sed -i '/lockCandidate(/d' registration/src/main/java/bj/asin/registration/service/RegistrationWriter.java
+(cd registration && mvn -B test -Dtest=ConcurrencyTest)
+git checkout -- registration/src/main
+```
+
+Attendu : `Tests run: 3, Failures: 3` (5 inscrits au lieu de 10, 2 inscriptions le même jour). Après `git checkout`, tout redevient vert.
 
 ### Organisation
 
@@ -167,6 +227,14 @@ Test de mutation : sans les deux verrous, les trois tests de concurrence échoue
 | `repository`, `entity` | Spring Data JPA ; verrou du centre (`PESSIMISTIC_WRITE`) et verrou consultatif par NPI |
 | `common.exception` | Erreurs RFC 7807, compteur des refus par motif |
 | `config` | Client d'identification, horloge, description OpenAPI |
+
+### Arrêter et nettoyer
+
+```bash
+docker compose down -v
+```
+
+`-v` supprime aussi le volume de la base : le prochain démarrage repart d'un schéma neuf.
 
 ## Choix de la correction
 
