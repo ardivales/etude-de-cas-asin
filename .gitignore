@@ -1,0 +1,10 @@
+.idea/
+__pycache__/
+*.pyc
+
+*.log
+base_inscriptions.sql
+*.docx
+
+.env
+registration/target/
